@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent-Customer 架构梳理</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --card:#ffffff; --ink:#1f2329; --muted:#5f6672;
+    --line:#e3e6eb; --blue:#2b6de8; --teal:#0e9f8f; --amber:#d97706;
+    --purple:#7c3aed; --rose:#e11d48; --green:#16a34a;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;padding:32px 24px 64px;background:var(--bg);color:var(--ink);
+    font-family:"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7;}
+  .wrap{max-width:1080px;margin:0 auto;}
+  h1{font-size:28px;margin:0 0 6px;}
+  .sub{color:var(--muted);margin:0 0 28px;font-size:14px;}
+  h2{font-size:20px;margin:40px 0 14px;padding-left:12px;border-left:4px solid var(--blue);}
+  h3{font-size:16px;margin:22px 0 10px;}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:20px 24px;margin-bottom:18px;}
+  table{width:100%;border-collapse:collapse;font-size:14px;}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top;}
+  th{background:#f0f2f5;font-weight:600;white-space:nowrap;}
+  code{background:#eef1f5;border-radius:5px;padding:1px 7px;font-size:13px;
+    font-family:Consolas,"Courier New",monospace;}
+  .tag{display:inline-block;font-size:12px;font-weight:600;border-radius:20px;
+    padding:2px 10px;margin-right:6px;}
+  .t-blue{background:#e4edff;color:var(--blue);}
+  .t-teal{background:#dcf5f1;color:var(--teal);}
+  .t-amber{background:#fdf0dc;color:var(--amber);}
+  .t-purple{background:#eee6fe;color:var(--purple);}
+  .t-rose{background:#fde5eb;color:var(--rose);}
+  .t-green{background:#e0f5e5;color:var(--green);}
+  .note{background:#fff8e6;border:1px solid #f2dfae;border-radius:10px;
+    padding:12px 16px;font-size:14px;color:#7a5c12;}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  @media(max-width:760px){.grid{grid-template-columns:1fr;}}
+  .flowbox{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:18px;overflow-x:auto;}
+  svg{display:block;margin:0 auto;}
+  .legend{font-size:13px;color:var(--muted);margin-top:10px;text-align:center;}
+  ol,ul{padding-left:22px;margin:8px 0;}
+  li{margin:5px 0;}
+  .kbd{font-family:Consolas,monospace;background:#eceff3;border:1px solid var(--line);
+    border-radius:4px;padding:0 6px;font-size:13px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Agent-Customer 架构梳理</h1>
+<p class="sub">电商 AI 客服桌面应用 ｜ PyQt6 UI + 自研 Agent 框架 + LiteLLM + SQLite ｜ 整理于 2026-11-23</p>
+
+<!-- ============ 一、总体分层 ============ -->
+<h2>一、总体分层（自上而下）</h2>
+<div class="flowbox">
+<svg width="920" height="470" viewBox="0 0 920 470" font-family="Segoe UI, Microsoft YaHei, sans-serif">
+  <!-- UI 层 -->
+  <rect x="40" y="16" width="840" height="66" rx="10" fill="#e4edff" stroke="#2b6de8" stroke-width="1.5"/>
+  <text x="60" y="42" font-size="15" font-weight="600" fill="#2b6de8">① UI 层 · ui/ （PyQt6 + Fluent-Widgets）</text>
+  <text x="60" y="66" font-size="12.5" fill="#1f2329">main_ui 主窗口 ｜ auto_reply_ui 自动回复 ｜ Knowledge_ui 知识库 ｜ keyword_ui 关键词 ｜ setting_ui 设置 ｜ log_ui 日志</text>
+
+  <!-- 服务层 -->
+  <rect x="40" y="102" width="410" height="58" rx="10" fill="#dcf5f1" stroke="#0e9f8f" stroke-width="1.5"/>
+  <text x="60" y="126" font-size="15" font-weight="600" fill="#0e9f8f">② 基础设施 · core/ + service/</text>
+  <text x="60" y="150" font-size="12.5" fill="#1f2329">DI 容器 di_container ｜ 连接状态单例 ｜ 账号/关键词/知识导入服务</text>
+
+  <rect x="470" y="102" width="410" height="58" rx="10" fill="#eee6fe" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="490" y="126" font-size="15" font-weight="600" fill="#7c3aed">③ 桥接层 · bridge/ （解耦核心）</text>
+  <text x="490" y="150" font-size="12.5" fill="#1f2329">Context/ContextType 上下文 ｜ Reply ｜ ReplySender 抽象（隔离渠道）</text>
+
+  <!-- 渠道 + 消息 -->
+  <rect x="40" y="182" width="410" height="86" rx="10" fill="#fdf0dc" stroke="#d97706" stroke-width="1.5"/>
+  <text x="60" y="208" font-size="15" font-weight="600" fill="#b45309">④ 渠道层 · Channel/</text>
+  <text x="60" y="232" font-size="12.5" fill="#1f2329">channel.py 抽象基类 ｜ pinduoduo/pdd_channel.py</text>
+  <text x="60" y="252" font-size="12.5" fill="#1f2329">core/：连接 · 生命周期 · 状态 · 消息分派 ｜ utils/API/：PDD HTTP 封装</text>
+
+  <rect x="470" y="182" width="410" height="86" rx="10" fill="#fde5eb" stroke="#e11d48" stroke-width="1.5"/>
+  <text x="490" y="208" font-size="15" font-weight="600" fill="#be123c">⑤ 消息处理层 · Message/</text>
+  <text x="490" y="232" font-size="12.5" fill="#1f2329">core/：queue 队列 ｜ consumer worker 池 ｜ handlers 基类</text>
+  <text x="490" y="252" font-size="12.5" fill="#1f2329">handlers/：preprocessor 预处理 ｜ keyword 关键词 ｜ ai_handler AI 兜底</text>
+
+  <!-- Agent 层 -->
+  <rect x="40" y="290" width="840" height="96" rx="10" fill="#e0f5e5" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="60" y="316" font-size="15" font-weight="600" fill="#15803d">⑥ Agent 层 · Agent/CustomerAgent/ （自研框架，不依赖 LangChain）</text>
+  <text x="60" y="340" font-size="12.5" fill="#1f2329">custom/：customer_agent 主循环 ｜ llm_client（LiteLLM 异步调用） ｜ session_manager 会话与压缩</text>
+  <text x="60" y="360" font-size="12.5" fill="#1f2329">message_builder 提示词构建 ｜ tool_decorator + tool_executor 工具注册/并发执行 ｜ multimodal 图片编解码</text>
+  <text x="60" y="380" font-size="12.5" fill="#1f2329">tools/：get_shop_products · send_goods_link · get_product_knowledge · search_customer_service_knowledge · transfer_conversation</text>
+
+  <!-- 数据层 -->
+  <rect x="40" y="408" width="840" height="48" rx="10" fill="#f0f2f5" stroke="#5f6672" stroke-width="1.5"/>
+  <text x="60" y="430" font-size="15" font-weight="600" fill="#3c4450">⑦ 数据与工具层 · database/ + utils/</text>
+  <text x="60" y="450" font-size="12.5" fill="#1f2329">SQLite + SQLAlchemy（6 张表）｜ knowledge_service 检索 ｜ product_sync 商品同步 ｜ LLM 供应商路由 · DPAPI 加密 · Loguru · asyncio</text>
+
+  <!-- 箭头 -->
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#8a94a6"/>
+    </marker>
+  </defs>
+  <line x1="250" y1="82" x2="250" y2="100" stroke="#8a94a6" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="670" y1="82" x2="670" y2="100" stroke="#8a94a6" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="250" y1="160" x2="250" y2="180" stroke="#8a94a6" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="670" y1="160" x2="670" y2="180" stroke="#8a94a6" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="460" y1="225" x2="452" y2="225" stroke="#8a94a6" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="250" y1="268" x2="300" y2="288" stroke="#8a94a6" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="670" y1="268" x2="620" y2="288" stroke="#8a94a6" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="460" y1="386" x2="460" y2="406" stroke="#8a94a6" stroke-width="2" marker-end="url(#arr)"/>
+</svg>
+<p class="legend">依赖方向：UI → core/bridge → Channel/Message → Agent → database/utils；模块间用延迟导入避免循环依赖</p>
+</div>
+
+<!-- ============ 二、消息流转 ============ -->
+<h2>二、一条消息的完整生命周期</h2>
+<div class="flowbox">
+<svg width="920" height="330" viewBox="0 0 920 330" font-family="Segoe UI, Microsoft YaHei, sans-serif">
+  <defs>
+    <marker id="arr2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#2b6de8"/>
+    </marker>
+  </defs>
+  <!-- step boxes -->
+  <g font-size="13">
+    <rect x="20" y="30" width="200" height="70" rx="10" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+    <text x="120" y="58" text-anchor="middle" font-weight="600" fill="#b45309">1. WebSocket 收消息</text>
+    <text x="120" y="80" text-anchor="middle" fill="#1f2329">PDD 服务器 → pdd_connection</text>
+
+    <rect x="260" y="30" width="200" height="70" rx="10" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+    <text x="360" y="58" text-anchor="middle" font-weight="600" fill="#b45309">2. 解析 + 转 Context</text>
+    <text x="360" y="80" text-anchor="middle" fill="#1f2329">pdd_message_handler 按 Action 分派</text>
+
+    <rect x="500" y="30" width="200" height="70" rx="10" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+    <text x="600" y="58" text-anchor="middle" font-weight="600" fill="#7c3aed">3. 入队</text>
+    <text x="600" y="80" text-anchor="middle" fill="#1f2329">queue_manager.put(context)</text>
+
+    <rect x="740" y="30" width="160" height="70" rx="10" fill="#fff" stroke="#e11d48" stroke-width="1.5"/>
+    <text x="820" y="58" text-anchor="middle" font-weight="600" fill="#be123c">4. Worker 消费</text>
+    <text x="820" y="80" text-anchor="middle" fill="#1f2329">MessageConsumer 池</text>
+
+    <rect x="740" y="150" width="160" height="70" rx="10" fill="#fff" stroke="#e11d48" stroke-width="1.5"/>
+    <text x="820" y="178" text-anchor="middle" font-weight="600" fill="#be123c">5. 处理器链</text>
+    <text x="820" y="200" text-anchor="middle" fill="#1f2329">关键词 → AI 兜底</text>
+
+    <rect x="500" y="150" width="200" height="70" rx="10" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="600" y="178" text-anchor="middle" font-weight="600" fill="#15803d">6. Agent 循环</text>
+    <text x="600" y="200" text-anchor="middle" fill="#1f2329">CustomerAgent 多轮 tool_calls</text>
+
+    <rect x="260" y="150" width="200" height="70" rx="10" fill="#fff" stroke="#0e9f8f" stroke-width="1.5"/>
+    <text x="360" y="178" text-anchor="middle" font-weight="600" fill="#0e9f8f">7. ReplySender 发送</text>
+    <text x="360" y="200" text-anchor="middle" fill="#1f2329">get_sender().send_text()</text>
+
+    <rect x="20" y="150" width="200" height="70" rx="10" fill="#fff" stroke="#2b6de8" stroke-width="1.5"/>
+    <text x="120" y="178" text-anchor="middle" font-weight="600" fill="#2b6de8">8. 回复到达买家</text>
+    <text x="120" y="200" text-anchor="middle" fill="#1f2329">PDD API / 商品卡片</text>
+
+    <!-- arrows -->
+    <line x1="220" y1="65" x2="256" y2="65" stroke="#2b6de8" stroke-width="2" marker-end="url(#arr2)"/>
+    <line x1="460" y1="65" x2="496" y2="65" stroke="#2b6de8" stroke-width="2" marker-end="url(#arr2)"/>
+    <line x1="700" y1="65" x2="736" y2="65" stroke="#2b6de8" stroke-width="2" marker-end="url(#arr2)"/>
+    <path d="M820,100 L820,146" stroke="#2b6de8" stroke-width="2" fill="none" marker-end="url(#arr2)"/>
+    <line x1="740" y1="185" x2="704" y2="185" stroke="#2b6de8" stroke-width="2" marker-end="url(#arr2)"/>
+    <line x1="500" y1="185" x2="464" y2="185" stroke="#2b6de8" stroke-width="2" marker-end="url(#arr2)"/>
+    <line x1="260" y1="185" x2="224" y2="185" stroke="#2b6de8" stroke-width="2" marker-end="url(#arr2)"/>
+  </g>
+  <!-- action note -->
+  <rect x="20" y="248" width="880" height="64" rx="10" fill="#f0f2f5" stroke="#e3e6eb"/>
+  <text x="40" y="274" font-size="13" font-weight="600" fill="#3c4450">Action 分派（pdd_message_handler._dispatch_by_action）：</text>
+  <text x="40" y="298" font-size="13" fill="#1f2329">REPLY（进队列回复）· HANDOFF（转人工）· CONTEXT_ONLY（仅记录上下文）· IGNORE（忽略）· OBSERVE（旁路观察）</text>
+</svg>
+<p class="legend">异步链路：asyncio + websockets ｜ 处理器链优先级：关键词命中即短路，未命中走 AI 兜底</p>
+</div>
+
+<!-- ============ 三、模块职责 ============ -->
+<h2>三、模块职责一览</h2>
+<div class="card">
+<table>
+<tr><th>模块</th><th>定位</th><th>关键文件</th></tr>
+<tr><td><span class="tag t-blue">ui/</span></td><td>PyQt6 界面层，主窗口 + 各功能页</td><td><code>main_ui.py</code>、<code>auto_reply_ui.py</code>、<code>Knowledge_ui.py</code>、<code>setting_ui.py</code></td></tr>
+<tr><td><span class="tag t-teal">core/</span></td><td>DI 容器与全局服务注册（初始化顺序的核心）</td><td><code>di_container.py</code>（<code>configure_standard_services</code>）、<code>connection_status.py</code></td></tr>
+<tr><td><span class="tag t-purple">bridge/</span></td><td>渠道无关的数据结构与发送抽象，隔离 Channel 与 Agent</td><td><code>context.py</code>（Context/ContextType）、<code>sender.py</code>（ReplySender）</td></tr>
+<tr><td><span class="tag t-amber">Channel/</span></td><td>拼多多渠道接入：WebSocket 连接、重连心跳、消息解析、HTTP API</td><td><code>pinduoduo/pdd_channel.py</code>、<code>core/pdd_message_handler.py</code>、<code>utils/API/</code></td></tr>
+<tr><td><span class="tag t-rose">Message/</span></td><td>异步消息队列 + worker 池 + 处理器链</td><td><code>core/queue.py</code>、<code>core/consumer.py</code>、<code>handlers/ai_handler.py</code>、<code>handlers/keyword_handler.py</code></td></tr>
+<tr><td><span class="tag t-green">Agent/</span></td><td>自研 Agent 框架：LLM 客户端、会话管理、工具执行、5 个业务工具</td><td><code>custom/customer_agent.py</code>、<code>custom/tool_executor.py</code>、<code>tools/*.py</code></td></tr>
+<tr><td><span class="tag t-blue">database/</span></td><td>SQLite 持久层 + 双知识库检索 + 商品知识同步</td><td><code>models.py</code>、<code>knowledge_service.py</code>、<code>product_sync.py</code></td></tr>
+<tr><td><span class="tag t-teal">service/</span></td><td>业务薄封装</td><td><code>account_service.py</code>、<code>keyword_service.py</code>、<code>knowledge_io.py</code></td></tr>
+<tr><td><span class="tag t-purple">utils/</span></td><td>通用工具</td><td><code>llm_provider.py</code>（供应商路由）、<code>secret_store.py</code>（DPAPI）、<code>logger_loguru.py</code></td></tr>
+</table>
+</div>
+
+<!-- ============ 四、Agent 内部 ============ -->
+<h2>四、Agent 内部机制（自研框架要点）</h2>
+<div class="grid">
+  <div class="card">
+    <h3>核心循环</h3>
+    <ol>
+      <li>加载会话历史 → 过长则压缩（<code>session_manager</code>）</li>
+      <li><code>message_builder</code> 组装 system prompt + 消息列表</li>
+      <li><code>llm_client</code> 经 LiteLLM 异步调用 Chat Completions</li>
+      <li>若返回 <code>tool_calls</code> → <code>tool_executor</code> 执行后回填结果，继续循环</li>
+      <li>产出最终文本 → 交给 ReplySender 发送</li>
+    </ol>
+    <div class="note">工具并发策略：只读工具（查商品/查知识）<b>并行</b>执行，有副作用工具（发卡片/转人工）<b>串行</b>执行。</div>
+  </div>
+  <div class="card">
+    <h3>工具与知识体系</h3>
+    <ul>
+      <li><code>@agent_tool</code> 装饰器注册到全局 TOOL_REGISTRY，Pydantic 模型自动生成 schema</li>
+      <li>5 个工具：商品列表 / 商品卡片 / 商品知识 / 客服知识 / 转人工</li>
+      <li><b>双知识库</b>：product_knowledge（商品）+ customer_service_knowledge（售后/物流/退款），jieba 分词检索</li>
+      <li>商品知识由 product_sync 从 PDD API 拉取后调多模态 LLM 提取入库</li>
+    </ul>
+    <div class="note">身份字段（店铺/账号）来自可信 dependencies 注入，不从用户消息中取，防提示注入越权。</div>
+  </div>
+</div>
+
+<!-- ============ 五、数据模型与配置 ============ -->
+<h2>五、数据模型与配置</h2>
+<div class="grid">
+  <div class="card">
+    <h3>SQLite 6 张表（temp/channel_shop.db）</h3>
+    <ul>
+      <li><code>channels</code> / <code>shops</code> / <code>accounts</code>（密码 DPAPI 加密）</li>
+      <li><code>keywords</code> —— 转人工关键词</li>
+      <li><code>product_knowledge</code> —— 产品知识库</li>
+      <li><code>customer_service_knowledge</code> —— 客服知识库</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>配置体系（config.py · Pydantic）</h3>
+    <ul>
+      <li><code>llm</code>：供应商 / 模型 / API Key（DPAPI 落盘）/ Base URL / 端点信任模式 / 工具策略</li>
+      <li>六供应商路由：DeepSeek · 火山 · OpenAI-compatible · Kimi · 智谱 · Qwen</li>
+      <li><code>business_hours</code> 营业时间、<code>prompt.instructions</code> 回复指令</li>
+      <li>配置变更按账号 profile 快照生效，运行中账号需重启才应用新配置</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============ 六、设计亮点 ============ -->
+<h2>六、设计亮点与注意点</h2>
+<div class="card">
+<ul>
+  <li><b>初始化顺序刚性</b>：config → DI 容器（<code>configure_standard_services</code>）→ db → logger → queue → consumer → status_manager，UI 延迟加载。</li>
+  <li><b>bridge 层解耦</b>：Agent 与 Message 只认 Context/Reply/ReplySender 抽象，新增渠道（如抖音、淘宝）只需实现 Channel + Sender，不动业务层。</li>
+  <li><b>多账号隔离</b>：每个 AutoReplyThread 持有独立 PDDChannel 实例与 profile 快照，共享 ConnectionStatusManager 单例。</li>
+  <li><b>健壮性</b>：WebSocket 自动重连 + 心跳；消息队列削峰（默认容量 1000，worker 并发 10）；图片超限时降级为纯文本。</li>
+  <li><b>安全</b>：远程端点强制 HTTPS + 证书校验，拒绝元数据/链路本地地址与跨主机重定向；API Key 走 Windows DPAPI。</li>
+  <li><b>可扩展点</b>：渠道基类 <code>channel.py</code>、处理器链 <code>handler_chain()</code>、工具注册器均预留了扩展位。</li>
+</ul>
+</div>
+
+</div>
+</body>
+</html>
