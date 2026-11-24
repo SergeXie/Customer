@@ -30,10 +30,10 @@ from Agent.CustomerAgent.custom.multimodal import (  # noqa: E402
     validate_image_urls,
 )
 from Agent.CustomerAgent.custom.customer_agent import CustomerAgent  # noqa: E402
+from Agent.CustomerAgent.custom.lc_chat_model import message_to_openai  # noqa: E402
 from Agent.CustomerAgent.custom.llm_client import LLMResponse  # noqa: E402
 from Agent.CustomerAgent.custom.message_builder import MessageBuilder  # noqa: E402
 from Agent.CustomerAgent.custom.session_manager import SessionManager  # noqa: E402
-from Agent.CustomerAgent.custom.tool_executor import ToolExecutor  # noqa: E402
 from bridge.context import ChannelType, Context, ContextType  # noqa: E402
 from utils.llm_transport import LLMErrorCategory, LLMTransportError  # noqa: E402
 
@@ -402,33 +402,49 @@ class VisionFallbackTest(unittest.IsolatedAsyncioTestCase):
 class ImageRoundTripThroughAgentTest(unittest.IsolatedAsyncioTestCase):
     """端到端：买家发图 -> 持久化 -> 下一轮从历史还原图片。"""
 
-    def make_agent(self, directory, client):
+    def make_agent(self, directory, model):
         agent = object.__new__(CustomerAgent)
-        agent._config = SimpleNamespace(max_loops=2)
-        agent._llm_client = client
-        agent._tool_executor = ToolExecutor()
+        agent._config = SimpleNamespace(max_loops=2, temperature=0.3)
         agent._message_builder = MessageBuilder(
             business_hours={"start": "08:00", "end": "23:00"}
         )
         agent._session_manager = SessionManager(str(Path(directory) / "agent.db"))
         agent._active_profile = SimpleNamespace(provider="volcengine", model_name="doubao")
         agent._is_initialized = True
+        agent._build_chat_model = lambda: model
         return agent
 
-    def make_client(self):
+    def make_model(self):
+        """Capturing LangChain chat model used by create_agent."""
+        from langchain_core.language_models.chat_models import BaseChatModel
+        from langchain_core.messages import AIMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
         calls = []
 
-        class Client:
-            async def chat(self, messages, **kwargs):
-                calls.append(messages)
-                return LLMResponse("亲，收到了～", [], object(), {})
+        class CapturingModel(BaseChatModel):
+            @property
+            def _llm_type(self) -> str:
+                return "capturing"
 
-        return Client(), calls
+            def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+                return self
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                raise NotImplementedError
+
+            async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+                calls.append([message_to_openai(m) for m in messages])
+                return ChatResult(
+                    generations=[ChatGeneration(message=AIMessage(content="亲，收到了～"))]
+                )
+
+        return CapturingModel(), calls
 
     async def test_buyer_image_is_persisted_and_restored_next_turn(self):
         with TemporaryDirectory() as directory:
-            client, calls = self.make_client()
-            agent = self.make_agent(directory, client)
+            model, calls = self.make_model()
+            agent = self.make_agent(directory, model)
             try:
                 await agent._async_reply_unlocked(
                     f"[图片] {PDD_IMAGE}",
@@ -464,8 +480,8 @@ class ImageRoundTripThroughAgentTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_text_only_conversation_stays_text_only(self):
         with TemporaryDirectory() as directory:
-            client, calls = self.make_client()
-            agent = self.make_agent(directory, client)
+            model, calls = self.make_model()
+            agent = self.make_agent(directory, model)
             try:
                 await agent._async_reply_unlocked(
                     "你好", text_context("你好"), session_id="session-text"

@@ -6,7 +6,7 @@
 ## 功能特性
 
 - **渠道支持**：目前支持拼多多平台 WebSocket 实时消息接收
-- **AI 智能回复**：基于 Agent 框架，多轮工具调用 + 会话上下文管理
+- **AI 智能回复**：基于 LangChain / LangGraph Agent（`create_agent`），多轮工具调用 + 会话上下文管理
 - **AI 主动推荐**：客服代理可主动获取商品列表、发送商品卡片给用户
 - **双知识库体系**：产品知识库 + 客服知识库，分别检索商品信息与售后/物流/退款等政策
 - **关键词转人工**：自动识别用户意图，支持关键词触发转人工服务
@@ -48,7 +48,7 @@ python app.py
 
 首次运行后会生成 `config.json`。推荐在“系统设置 → LLM 模型配置”中填写 API Key；示例、日志和 CI 都不需要环境变量，也不包含真实密钥。
 
-应用通过 LiteLLM 直接调用 Chat Completions，不需要单独启动 LiteLLM Proxy。设置页提供以下六个供应商：
+应用通过 LiteLLM 直接调用 Chat Completions（Agent 循环由 LangGraph `create_agent` 驱动），不需要单独启动 LiteLLM Proxy。设置页提供以下六个供应商：
 
 | 设置页供应商 | LiteLLM 路由前缀 | 默认 Base URL | Base URL 规则 |
 | --- | --- | --- | --- |
@@ -164,9 +164,9 @@ python -m unittest discover -s tests -t .
 ```
 text
 Agent-Customer/
-├── Agent/                  # AI 代理模块（自研 Agent 框架）
+├── Agent/                  # AI 代理模块（LangChain / LangGraph）
 │   └── CustomerAgent/
-│       ├── custom/         # 自研实现：LLM 客户端、会话管理、工具执行器
+│       ├── custom/         # LangChain ChatModel、工具适配、消息转换、会话管理
 │       └── tools/          # Agent 工具集（商品/知识/转人工）
 ├── Channel/                # 渠道集成
 │   └── pinduoduo/
@@ -191,7 +191,7 @@ Agent-Customer/
 | 类别 | 技术 |
 |------|------|
 | UI 框架 | PyQt6 + pyqt6-fluent-widgets |
-| AI 框架 | 自研 Agent 框架 + LiteLLM 直接异步调用 |
+| AI 框架 | LangChain 1.x + LangGraph `create_agent` + LiteLLM 直接异步调用 |
 | 数据库 | SQLAlchemy + SQLite |
 | 中文分词 | jieba（BM25/关键词检索） |
 | 向量检索 | pymilvus + Milvus Lite（FLAT 索引）+ BM25 混合召回（RRF） |

@@ -1,14 +1,17 @@
 """
-Agent/CustomerAgent/custom/ - 自定义 Agent 实现（无 Agno 依赖）
+Agent/CustomerAgent/custom/ - LangGraph 客服 Agent 实现
 
 包含：
 - agent_config: Agent 配置管理
-- llm_client: LLM 客户端封装
+- lc_chat_model: LangChain ChatModel（LiteLLM 传输 + 视觉降级）
+- lc_tools: @agent_tool 注册表 → LangChain 工具（可信身份注入）
+- lc_messages: OpenAI 消息 dict ↔ LangChain 消息
+- llm_client: LLM 客户端封装（上下文压缩摘要仍使用）
 - message_builder: 消息和 Prompt 构建器
-- tool_executor: 工具执行器
+- tool_executor: 工具执行器（兼容保留）
 - tool_decorator: 工具系统（装饰器 + 注册表）
 - session_manager: 会话历史管理（SQLite + 上下文压缩）
-- customer_agent: 自定义 CustomerAgent 实现（主入口）
+- customer_agent: 主入口（对外接口不变，内部走 create_agent）
 """
 
 from Agent.CustomerAgent.custom.agent_config import (
@@ -19,6 +22,21 @@ from Agent.CustomerAgent.custom.agent_config import (
     DEFAULT_RETAIN_COUNT,
     DEFAULT_MAX_LOOPS,
     DEFAULT_TEMPERATURE,
+)
+
+from Agent.CustomerAgent.custom.lc_chat_model import (
+    LiteLLMChatModel,
+)
+
+from Agent.CustomerAgent.custom.lc_tools import (
+    build_langchain_tools,
+    execute_registry_tool,
+)
+
+from Agent.CustomerAgent.custom.lc_messages import (
+    final_ai_text,
+    openai_messages_to_langchain,
+    split_system_prompt,
 )
 
 from Agent.CustomerAgent.custom.llm_client import (
@@ -59,6 +77,13 @@ __all__ = [
     "DEFAULT_RETAIN_COUNT",
     "DEFAULT_MAX_LOOPS",
     "DEFAULT_TEMPERATURE",
+    # LangChain 集成
+    "LiteLLMChatModel",
+    "build_langchain_tools",
+    "execute_registry_tool",
+    "final_ai_text",
+    "openai_messages_to_langchain",
+    "split_system_prompt",
     # LLM 客户端
     "LLMClient",
     "LLMResponse",
@@ -81,3 +106,4 @@ __all__ = [
     # 主 Agent
     "CustomerAgent",
 ]
+

@@ -1,13 +1,14 @@
 """
 自定义 CustomerAgent 实现
 
-完全自主实现，不依赖 Agno 框架。
+对外接口保持不变（async_reply / initialize_async / close / record_context），
+内部 Agent 循环改为 LangGraph ``create_agent``：
 
-本模块已重构，职责分离为：
-- agent_config.py: 配置管理
-- llm_client.py: LLM 客户端封装
-- message_builder.py: 消息和 Prompt 构建
-- tool_executor.py: 工具执行器
+- lc_chat_model: LiteLLM 传输之上的 LangChain ChatModel（含视觉降级）
+- lc_tools: 将 @agent_tool 注册表适配为 LangChain 工具（可信身份注入）
+- lc_messages: OpenAI 消息 dict ↔ LangChain 消息转换
+
+会话持久化、上下文压缩、Prompt 构建仍由 SessionManager / MessageBuilder 负责。
 """
 from __future__ import annotations
 
@@ -15,6 +16,9 @@ import asyncio
 import json
 import uuid
 from typing import Any, Dict, List, Optional
+
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, ToolMessage
 
 from Agent.bot import Bot
 
@@ -34,7 +38,7 @@ from bridge.context import (
 )
 from bridge.reply import Reply, ReplyType
 from Agent.CustomerAgent.custom.session_manager import SessionManager
-from Agent.CustomerAgent.custom.tool_decorator import get_tools_for_llm
+from Agent.CustomerAgent.custom.tool_decorator import TOOL_REGISTRY
 from utils.logger_loguru import get_logger
 
 # 导入重构后的模块
@@ -47,6 +51,13 @@ from Agent.CustomerAgent.custom.agent_config import (
     DEFAULT_MAX_LOOPS,
     DEFAULT_TEMPERATURE,
 )
+from Agent.CustomerAgent.custom.lc_chat_model import LiteLLMChatModel
+from Agent.CustomerAgent.custom.lc_messages import (
+    final_ai_text,
+    openai_messages_to_langchain,
+    split_system_prompt,
+)
+from Agent.CustomerAgent.custom.lc_tools import build_langchain_tools
 from Agent.CustomerAgent.custom.llm_client import LLMClient, LLMResponse
 from Agent.CustomerAgent.custom.message_builder import MessageBuilder
 from Agent.CustomerAgent.custom.multimodal import (
@@ -56,7 +67,6 @@ from Agent.CustomerAgent.custom.multimodal import (
     has_image_blocks,
     strip_image_blocks,
 )
-from Agent.CustomerAgent.custom.tool_executor import ToolExecutor, ToolResult
 from utils.llm_transport import LLMErrorCategory
 
 logger = get_logger("CustomerAgent")
@@ -64,23 +74,14 @@ logger = get_logger("CustomerAgent")
 
 class CustomerAgent(Bot):
     """
-    自定义客服 Agent
+    LangGraph 客服 Agent（对外接口与旧版一致）
 
     核心循环：
     1. 加载历史消息
     2. 检查上下文压缩
-    3. 构建 messages 列表
-    4. 调用 LLM → 解析 tool_calls
-    5. 并行执行工具 → 回传结果
-    6. 循环直到无工具调用
-    7. 返回最终回复
-
-    职责已分离到子模块：
-    - AgentConfig: 配置管理
-    - LLMClient: LLM API 调用
-    - MessageBuilder: 消息和 Prompt 构建
-    - ToolExecutor: 工具执行
-    - SessionManager: 会话管理（已有独立模块）
+    3. 构建 messages 列表（MessageBuilder）
+    4. create_agent → 模型与工具循环（LangGraph）
+    5. 持久化中间 tool 轨迹，返回最终回复
     """
 
     def __init__(
@@ -109,9 +110,7 @@ class CustomerAgent(Bot):
         self._llm_client: Optional[LLMClient] = None
         self._active_profile = None
         self._message_builder: Optional[MessageBuilder] = None
-        self._tool_executor: Optional[ToolExecutor] = None
         self._session_manager: Optional[SessionManager] = None
-        self._tools: List[Dict[str, Any]] = []
         self._initialize_lock = asyncio.Lock()
         self._conversation_locks: Dict[str, asyncio.Lock] = {}
         self._fallback_session_id = f"fallback_{uuid.uuid4().hex}"
@@ -144,7 +143,7 @@ class CustomerAgent(Bot):
             # must not mutate this account's in-flight client.
             self._active_profile = self._config.profile
 
-            # 3. 初始化 LLM 客户端
+            # 3. 初始化 LLM 客户端（上下文压缩摘要仍走此通道）
             self._llm_client = LLMClient(
                 profile=self._active_profile,
                 temperature=self._config.temperature,
@@ -165,14 +164,9 @@ class CustomerAgent(Bot):
                 instructions=self._config.instructions,
             )
 
-            # 6. 初始化工具执行器
-            self._tool_executor = ToolExecutor()
-
-            # 7. 加载工具列表
-            self._tools = get_tools_for_llm()
-            self._llm_client.tools = self._tools
-            tool_names = [t.get("function", {}).get("name", "unknown") for t in self._tools]
-            logger.info(f"已加载 {len(self._tools)} 个工具: {tool_names}")
+            # 6. 记录已注册工具（执行时由 build_langchain_tools 按请求绑定）
+            tool_names = list(TOOL_REGISTRY.keys())
+            logger.info(f"已加载 {len(tool_names)} 个工具: {tool_names}")
 
             self._is_initialized = True
             logger.info(f"CustomerAgent 初始化成功: model={self._config.model_name}")
@@ -199,9 +193,7 @@ class CustomerAgent(Bot):
             self._llm_client = None
             self._session_manager = None
             self._message_builder = None
-            self._tool_executor = None
             self._active_profile = None
-            self._tools = []
             self._conversation_locks.clear()
             self._is_initialized = False
 
@@ -302,106 +294,130 @@ class CustomerAgent(Bot):
             )
             return Reply(ReplyType.TEXT, "抱歉，我现在无法回复，请稍后再试。")
 
+    def _build_chat_model(self) -> LiteLLMChatModel:
+        """LangChain chat model bound to this account's validated profile."""
+        if self._active_profile is None:
+            raise RuntimeError("CustomerAgent 尚未初始化")
+        return LiteLLMChatModel(
+            profile=self._active_profile,
+            temperature=self._config.temperature,
+        )
+
+    def _agent_recursion_limit(self) -> int:
+        """Map max_loops onto LangGraph's node-step budget.
+
+        Each tool round is roughly a model node plus a tool node; add headroom
+        for the initial and final model calls.
+        """
+        return max(4, int(self._config.max_loops) * 2 + 3)
+
     async def _run_agent_loop(
         self,
         messages: List[Dict[str, Any]],
         dependencies: Dict[str, Any],
         session_id: Optional[str] = None,
     ) -> str:
-        """
-        Agent 循环核心
+        """LangGraph create_agent 循环：模型 ⇄ 工具，直到产出最终文本。"""
+        system_prompt, rest = split_system_prompt(messages)
+        lc_input = openai_messages_to_langchain(rest)
+        # create_agent prepends system_prompt as a SystemMessage when set.
+        input_len = len(lc_input) + (1 if system_prompt else 0)
 
-        调用 LLM → 检查 tool_calls → 并行执行工具 → 回传结果 → 循环
-        """
-        loop_count = 0
+        try:
+            model = self._build_chat_model()
+            tools = build_langchain_tools(dependencies or {})
+            agent = create_agent(
+                model,
+                tools or None,
+                system_prompt=system_prompt or None,
+            )
+        except Exception as e:
+            logger.error(f"Agent 构建失败: error_type={type(e).__name__}")
+            return "抱歉，AI 服务暂时不可用，请稍后再试。"
 
-        while loop_count < self._config.max_loops:
-            # 1. 调用 LLM
-            try:
-                response = await self._chat_with_vision_fallback(
-                    messages, tool_choice="auto"
-                )
-            except Exception as e:
-                logger.error(
-                    f"LLM 调用失败: error_type={type(e).__name__}"
-                )
-                if loop_count == 0:
-                    return "抱歉，AI 服务暂时不可用，请稍后再试。"
-                # 已有中间结果，返回已生成的内容
-                for msg in reversed(messages):
-                    if msg.get("role") == "assistant" and msg.get("content"):
-                        return msg["content"]
-                return "抱歉，AI 服务暂时不可用，请稍后再试。"
+        current: List[Any] = list(lc_input)
+        received_state = False
+        try:
+            async for state in agent.astream(
+                {"messages": lc_input},
+                config={"recursion_limit": self._agent_recursion_limit()},
+                stream_mode="values",
+            ):
+                msgs = state.get("messages") if isinstance(state, dict) else None
+                if msgs:
+                    current = list(msgs)
+                    received_state = True
+        except Exception as e:
+            logger.error(f"Agent 循环失败: error_type={type(e).__name__}")
+            text = final_ai_text(current)
+            if text:
+                await self._persist_current(current, input_len, session_id)
+                return text
+            return "抱歉，AI 服务暂时不可用，请稍后再试。"
 
-            # 2. 解析响应
-            if not response.has_tool_calls:
-                # 无工具调用，返回内容
-                content = response.content or ""
-                messages.append({"role": "assistant", "content": content})
-                return content
+        await self._persist_current(current, input_len, session_id)
+        content = final_ai_text(current)
+        if not content and not received_state:
+            return "抱歉，AI 服务暂时不可用，请稍后再试。"
+        return content or "抱歉，我暂时无法回复。"
 
-            # 3. 保存 assistant 消息（包含 tool_calls）
-            assistant_msg = {
-                "role": "assistant",
-                "content": response.content or "",
-                "tool_calls": [
+    async def _persist_current(
+        self,
+        current: List[Any],
+        input_len: int,
+        session_id: Optional[str],
+    ) -> None:
+        """Persist intermediate tool rows; final text is saved by async_reply."""
+        if not session_id or not self._session_manager:
+            return
+        rows: List[Dict[str, Any]] = []
+        for message in current[input_len:]:
+            if isinstance(message, ToolMessage):
+                rows.append(
                     {
-                        "type": "function",
-                        "id": tc.id,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
+                        "role": "tool",
+                        "content": message.text(),
+                        "tool_call_id": message.tool_call_id,
                     }
-                    for tc in response.tool_calls
-                ],
-            }
-            messages.append(assistant_msg)
-            if session_id and self._session_manager:
+                )
+            elif isinstance(message, AIMessage) and message.tool_calls:
+                payload = {
+                    "content": message.text(),
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "id": tc.get("id") or "",
+                            "function": {
+                                "name": tc.get("name") or "",
+                                "arguments": json.dumps(
+                                    tc.get("args") or {}, ensure_ascii=False
+                                ),
+                            },
+                        }
+                        for tc in message.tool_calls
+                    ],
+                }
+                rows.append(
+                    {
+                        "role": "assistant",
+                        "content": json.dumps(payload, ensure_ascii=False),
+                        "tool_call_id": None,
+                    }
+                )
+        for row in rows:
+            try:
                 await asyncio.to_thread(
                     self._session_manager.add_message,
                     session_id=session_id,
-                    role="assistant",
-                    content=json.dumps(
-                        {"content": assistant_msg["content"], "tool_calls": assistant_msg["tool_calls"]},
-                        ensure_ascii=False,
-                    ),
+                    role=row["role"],
+                    content=row["content"],
+                    tool_call_id=row.get("tool_call_id"),
                 )
-
-            # 4. 检查循环上限
-            if loop_count >= self._config.max_loops - 1:
-                logger.warning(f"工具调用达到上限 {self._config.max_loops}，强制结束循环")
-                messages.append({
-                    "role": "user",
-                    "content": "[已达到最大工具调用次数，请基于已有信息给出最终回复。]",
-                })
-                try:
-                    final_response = await self._chat_with_vision_fallback(messages)
-                    return final_response.content or assistant_msg["content"]
-                except Exception:
-                    return assistant_msg["content"]
-
-            # 5. 并行执行所有工具调用
-            tool_results = await self._tool_executor.execute_parallel(
-                response.tool_calls, dependencies
-            )
-
-            # 6. 将结果追加到消息列表
-            for result in tool_results:
-                messages.append(result.to_dict())
-                if session_id and self._session_manager:
-                    await asyncio.to_thread(
-                        self._session_manager.add_message,
-                        session_id=session_id,
-                        role="tool",
-                        content=result.content,
-                        tool_call_id=result.tool_call_id,
-                    )
-
-            loop_count += 1
-
-        # 兜底
-        return messages[-1].get("content", "")
+            except Exception as exc:
+                logger.warning(
+                    f"persist agent transcript failed: error_type={type(exc).__name__}"
+                )
+                break
 
     async def _chat_with_vision_fallback(
         self,

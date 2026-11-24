@@ -11,10 +11,8 @@ from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
 from Agent.CustomerAgent.custom import customer_agent as customer_agent_module
 from Agent.CustomerAgent.custom.agent_config import AgentConfig
 from Agent.CustomerAgent.custom.tool_decorator import TOOL_REGISTRY, agent_tool
-from Agent.CustomerAgent.custom.tool_executor import ToolExecutor
 from Agent.CustomerAgent.custom.llm_client import LLMResponse
 from Agent.CustomerAgent.custom.session_manager import SessionManager
-from Agent.CustomerAgent.custom.tool_decorator import get_tools_for_llm
 from utils.llm_provider import LLMProfile, LLMProvider
 from utils.llm_transport import NormalizedFunction, NormalizedToolCall
 
@@ -54,7 +52,7 @@ class CustomerAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             return_value=profile_config,
         ), mock.patch.object(customer_agent_module, "LLMClient", FakeClient), mock.patch.object(
             customer_agent_module, "SessionManager", return_value=fake_session
-        ), mock.patch.object(customer_agent_module, "get_tools_for_llm", return_value=[]):
+        ):
             agent = CustomerAgent()
             self.assertTrue(await agent.initialize_async())
             self.assertTrue(FakeClient.instances[0].initialized)
@@ -63,6 +61,10 @@ class CustomerAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await agent.close()
 
     async def test_multi_round_tool_loop_preserves_transcript_and_profile_snapshot(self):
+        from langchain_core.language_models.chat_models import BaseChatModel
+        from langchain_core.messages import AIMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
         tool_name = "__test_customer_agent_lookup__"
 
         @agent_tool(
@@ -73,30 +75,47 @@ class CustomerAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         def lookup(params: _LookupParams) -> str:
             return f"lookup:{params.value}"
 
-        first_call = NormalizedToolCall(
-            id="call-1",
-            function=NormalizedFunction("__test_customer_agent_lookup__", '{"value":"x"}'),
-        )
+        responses = [
+            AIMessage(
+                content="checking",
+                tool_calls=[
+                    {
+                        "name": tool_name,
+                        "args": {"value": "x"},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="final answer"),
+        ]
 
-        class FakeClient:
-            def __init__(self):
-                self.calls = []
-                self.responses = [
-                    LLMResponse("checking", [first_call], object(), {}),
-                    LLMResponse("final answer", [], object(), {}),
-                ]
+        class ScriptedModel(BaseChatModel):
+            calls: list = []
 
-            async def chat(self, messages, **kwargs):
-                self.calls.append((messages, kwargs))
-                return self.responses.pop(0)
+            @property
+            def _llm_type(self) -> str:
+                return "scripted"
+
+            def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+                return self
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                raise NotImplementedError
+
+            async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+                ScriptedModel.calls.append(list(messages))
+                return ChatResult(
+                    generations=[ChatGeneration(message=responses.pop(0))]
+                )
+
+        ScriptedModel.calls = []
 
         with TemporaryDirectory() as directory:
             session = SessionManager(str(Path(directory) / "session.db"))
             try:
                 agent = object.__new__(CustomerAgent)
-                agent._config = SimpleNamespace(max_loops=3)
-                agent._llm_client = FakeClient()
-                agent._tool_executor = ToolExecutor()
+                agent._config = SimpleNamespace(max_loops=3, temperature=0.3)
                 agent._session_manager = session
                 profile = LLMProfile(
                     provider=LLMProvider.DEEPSEEK,
@@ -106,24 +125,24 @@ class CustomerAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 agent._active_profile = profile
                 messages = [{"role": "user", "content": "please lookup"}]
 
-                result = await agent._run_agent_loop(
-                    messages,
-                    {},
-                    session_id="session-1",
-                )
+                with mock.patch.object(
+                    agent, "_build_chat_model", return_value=ScriptedModel()
+                ):
+                    result = await agent._run_agent_loop(
+                        messages,
+                        {},
+                        session_id="session-1",
+                    )
 
                 self.assertEqual(result, "final answer")
-                self.assertEqual(messages[1]["tool_calls"][0]["id"], "call-1")
-                self.assertEqual(messages[2]["tool_call_id"], "call-1")
-                self.assertEqual(messages[2]["content"], "lookup:x")
-                self.assertEqual(len(agent._llm_client.calls), 2)
-                self.assertTrue(agent._llm_client.calls[0][1].get("tool_choice"))
+                self.assertEqual(len(ScriptedModel.calls), 2)
                 history = session.get_history("session-1")
                 self.assertEqual(
                     json.loads(history[0]["content"])["tool_calls"][0]["id"],
                     "call-1",
                 )
                 self.assertEqual(history[1]["tool_call_id"], "call-1")
+                self.assertEqual(history[1]["content"], "lookup:x")
             finally:
                 session.dispose()
                 TOOL_REGISTRY.pop(tool_name, None)
